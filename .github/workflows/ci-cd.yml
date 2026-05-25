@@ -1,0 +1,105 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+            artifact-name: clock-linux-amd64
+            binary-name: clock
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            artifact-name: clock-linux-arm64
+            binary-name: clock
+          - os: macos-latest
+            arch: amd64
+            artifact-name: clock-macos-amd64
+            binary-name: clock
+            cmake-args: -DCMAKE_OSX_ARCHITECTURES=x86_64
+          - os: macos-latest
+            arch: arm64
+            artifact-name: clock-macos-arm64
+            binary-name: clock
+          - os: windows-latest
+            arch: amd64
+            artifact-name: clock-windows-amd64
+            binary-name: clock.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake-args }}
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Locate binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN=$(find build -name "${{ matrix.binary-name }}" -type f 2>/dev/null | head -1)
+            echo "BINARY_PATH=$BIN" >> $GITHUB_ENV
+          else
+            echo "BINARY_PATH=build/${{ matrix.binary-name }}" >> $GITHUB_ENV
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ env.BINARY_PATH }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create archives
+        shell: bash
+        run: |
+          cd artifacts
+          for dir in */; do
+            name=${dir%/}
+            file=$(find "$dir" -type f | head -1)
+            ext="${file##*.}"
+            if [ "$ext" = "exe" ]; then
+              mv "$file" "${name}.exe"
+              rmdir "$dir" 2>/dev/null || true
+            else
+              chmod +x "$file"
+              mv "$file" "${name}"
+              rmdir "$dir" 2>/dev/null || true
+            fi
+          done
+          ls -la
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

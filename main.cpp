@@ -4,16 +4,79 @@
 #include <thread>
 #include <csignal>
 #include <cstdlib>
-#include <termios.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <string>
 #include <algorithm>
 #include <vector>
 #include <memory>
 #include <map>
 
-// 时区类
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <conio.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#include <fcntl.h>
+#endif
+
+namespace {
+
+#ifdef _WIN32
+void set_raw_mode(bool raw) {
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    static DWORD orig_mode;
+    if (raw) {
+        GetConsoleMode(hStdin, &orig_mode);
+        DWORD mode = orig_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        SetConsoleMode(hStdin, mode);
+    } else {
+        SetConsoleMode(hStdin, orig_mode);
+    }
+}
+
+int read_key() {
+    if (!_kbhit()) return -1;
+    int ch = _getch();
+    if (ch == 0xE0) {
+        ch = _getch();
+        return ch | 0x100;
+    }
+    return ch;
+}
+#else
+struct termios orig_termios;
+
+void set_raw_mode(bool raw) {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    if (raw) {
+        struct termios ttystate;
+        tcgetattr(STDIN_FILENO, &ttystate);
+        ttystate.c_lflag &= ~(ICANON | ECHO);
+        ttystate.c_cc[VMIN] = 0;
+        ttystate.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
+    } else {
+        tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+    }
+}
+
+int read_key() {
+    char ch;
+    if (read(STDIN_FILENO, &ch, 1) != 1) return -1;
+    if (ch == 27) {
+        char seq[2];
+        if (read(STDIN_FILENO, &seq, 2) == 2 && seq[0] == '[') {
+            return seq[1] | 0x100;
+        }
+        return 27;
+    }
+    return static_cast<unsigned char>(ch);
+}
+#endif
+
+}
+
 class TimeZone {
 private:
     int offset_hours;
@@ -72,7 +135,6 @@ public:
     }
 };
 
-// 时钟显示器类
 class ClockDisplay {
 private:
     static volatile bool running;
@@ -80,20 +142,6 @@ private:
     int width;
     std::vector<std::unique_ptr<TimeZone>> timezones;
     int system_offset;
-    struct termios original_termios;
-    
-    static void setTerminalMode(bool raw) {
-        struct termios ttystate;
-        tcgetattr(STDIN_FILENO, &ttystate);
-        if (raw) {
-            ttystate.c_lflag &= ~(ICANON | ECHO);
-            ttystate.c_cc[VMIN] = 0;
-            ttystate.c_cc[VTIME] = 0;
-        } else {
-            ttystate.c_lflag |= ICANON | ECHO;
-        }
-        tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
-    }
     
     static void setCursorVisible(bool visible) {
         std::cout << (visible ? "\033[?25h" : "\033[?25l");
@@ -208,32 +256,22 @@ private:
     }
     
     void handleInput() {
-        char ch;
-        if (read(STDIN_FILENO, &ch, 1) == 1) {
-            switch(ch) {
-                case 'q':
-                case 'Q':
-                    running = false;
-                    break;
-                case 'r':
-                case 'R':
-                    std::cout << "\033[2J\033[H";
-                    break;
-                case 27: {
-                    char seq[2];
-                    if (read(STDIN_FILENO, &seq, 2) == 2) {
-                        if (seq[0] == '[') {
-                            if (seq[1] == 'D') {
-                                current_index = (current_index - 1 + timezones.size()) % timezones.size();
-                                std::cout << "\033[2J\033[H";
-                            } else if (seq[1] == 'C') {
-                                current_index = (current_index + 1) % timezones.size();
-                                std::cout << "\033[2J\033[H";
-                            }
-                        }
-                    }
-                    break;
-                }
+        int ch = read_key();
+        if (ch < 0) return;
+        
+        if (ch & 0x100) {
+            int arrow = ch & 0xFF;
+            if (arrow == 0x4B || arrow == 0x44) {
+                current_index = (current_index - 1 + timezones.size()) % timezones.size();
+                std::cout << "\033[2J\033[H";
+            } else if (arrow == 0x4D || arrow == 0x43) {
+                current_index = (current_index + 1) % timezones.size();
+                std::cout << "\033[2J\033[H";
+            }
+        } else {
+            switch (ch) {
+                case 'q': case 'Q': running = false; break;
+                case 'r': case 'R': std::cout << "\033[2J\033[H"; break;
             }
         }
     }
@@ -264,28 +302,22 @@ private:
     
 public:
     ClockDisplay() : current_index(0), width(55) {
-        tcgetattr(STDIN_FILENO, &original_termios);
-        
         std::signal(SIGINT, signalHandler);
         
-        // 保存当前屏幕内容（使用 alternate screen buffer）
-        std::cout << "\033[?1049h";  // 切换到备用屏幕
+        std::cout << "\033[?1049h";
         std::cout.flush();
         
-        setTerminalMode(true);
+        set_raw_mode(true);
         setCursorVisible(false);
         initTimezones();
         
-        std::cout << "\033[2J\033[H";  // 清空备用屏幕
+        std::cout << "\033[2J\033[H";
     }
     
     ~ClockDisplay() {
-        // 恢复终端设置
         setCursorVisible(true);
-        setTerminalMode(false);
-        tcsetattr(STDIN_FILENO, TCSANOW, &original_termios);
+        set_raw_mode(false);
         
-        // 切换回主屏幕，备用屏幕自动消失
         std::cout << "\033[?1049l";
         std::cout.flush();
     }
