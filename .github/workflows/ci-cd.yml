@@ -87,13 +87,14 @@ jobs:
             name=${dir%/}
             file=$(find "$dir" -type f | head -1)
             ext="${file##*.}"
+            tmp="${name}.tmp"
+            mv "$file" "$tmp"
+            rmdir "$dir" 2>/dev/null || true
             if [ "$ext" = "exe" ]; then
-              mv "$file" "${name}.exe"
-              rmdir "$dir" 2>/dev/null || true
+              mv "$tmp" "${name}.exe"
             else
-              chmod +x "$file"
-              mv "$file" "${name}"
-              rmdir "$dir" 2>/dev/null || true
+              chmod +x "$tmp"
+              mv "$tmp" "${name}"
             fi
           done
           ls -la
