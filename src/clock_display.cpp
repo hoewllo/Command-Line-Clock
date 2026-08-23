@@ -43,21 +43,29 @@ void ClockDisplay::initTimezones() {
 }
 
 void ClockDisplay::calculateWidth() {
-    width = 55;
+    int max_width = std::max(12, columns - 2);
 
-    if (current_index < timezones.size()) {
+    if (detail == DetailLevel::Compact) {
+        std::string line = timezones[current_index]->getCode() + "  " +
+                           getShortTimeString(timezones[current_index]->getOffset());
+        width = std::min(max_width, (int)line.length() + 4);
+        width = std::max(width, 12);
+        return;
+    }
+
+    if (detail == DetailLevel::Standard) {
+        width = 55;
         std::string time_str = timezones[current_index]->getTimeString();
         std::string name_str = timezones[current_index]->getDisplayName();
         width = std::max(width, (int)name_str.length() + 8);
         width = std::max(width, (int)time_str.length() + 8);
+        width = std::min(width, std::min(max_width, 72));
+        return;
     }
 
-    std::string title = "WORLD CLOCK - Timezone Roller";
-    std::string tip = "<- Prev   Next ->   r Refresh   q Quit";
-    std::string utc_line = "UTC Time: " + getUTCTimeString();
-
-    width = std::max({width, (int)title.length() + 6,
-                      (int)tip.length() + 6, (int)utc_line.length() + 6});
+    // Full: 撑满可用宽度，让时区表多列铺开
+    width = std::max(60, max_width);
+    width = std::min(width, 140);
 }
 
 std::string ClockDisplay::getUTCTimeString() {
@@ -66,6 +74,40 @@ std::string ClockDisplay::getUTCTimeString() {
     char buffer[64];
     strftime(buffer, sizeof(buffer), "%a %b %d %H:%M:%S %Y", utc);
     return std::string(buffer);
+}
+
+std::string ClockDisplay::getShortTimeString(int offset) {
+    std::time_t now = std::time(nullptr);
+    std::time_t tz_time = now + offset * 3600;
+    std::tm* tm = std::gmtime(&tz_time);
+
+    char buffer[16];
+    strftime(buffer, sizeof(buffer), "%H:%M:%S", tm);
+    return std::string(buffer);
+}
+
+bool ClockDisplay::updateScreenSize() {
+    int new_columns = get_terminal_columns();
+    int new_rows = get_terminal_rows();
+    bool changed = (new_columns != columns || new_rows != rows);
+    columns = new_columns;
+    rows = new_rows;
+
+    DetailLevel new_detail;
+    if (columns < 50 || rows < 12) {
+        new_detail = DetailLevel::Compact;
+    } else if (columns < 80 || rows < 20) {
+        new_detail = DetailLevel::Standard;
+    } else {
+        new_detail = DetailLevel::Full;
+    }
+
+    if (new_detail != detail) {
+        detail = new_detail;
+        changed = true;
+    }
+
+    return changed;
 }
 
 void ClockDisplay::printBorder(char style) {
@@ -125,6 +167,86 @@ void ClockDisplay::printProgressBar() {
     std::cout << "| " << bar << std::string(padding, ' ') << " |" << std::endl;
 }
 
+void ClockDisplay::printAllTimezones() {
+    std::vector<std::string> entries;
+    int max_len = 0;
+    for (size_t i = 0; i < timezones.size(); ++i) {
+        std::string marker = (i == (size_t)current_index) ? "*" : " ";
+        std::string entry = marker + timezones[i]->getDisplayName() + "  " +
+                            timezones[i]->getTimeString();
+        max_len = std::max(max_len, (int)entry.length());
+        entries.push_back(entry);
+    }
+
+    int cols = std::max(1, (width - 2) / (max_len + 2));
+    cols = std::min(cols, (int)entries.size());
+    int col_w = (width - 2) / cols;
+
+    size_t row_count = (entries.size() + cols - 1) / cols;
+    for (size_t r = 0; r < row_count; ++r) {
+        std::string line = "|";
+        for (int c = 0; c < cols; ++c) {
+            size_t idx = r * cols + c;
+            std::string cell = (idx < entries.size()) ? entries[idx] : "";
+            if ((int)cell.length() > col_w - 1) {
+                cell = cell.substr(0, col_w - 1);
+            }
+            line += " " + cell + std::string(col_w - 1 - (int)cell.length(), ' ');
+        }
+        if ((int)line.length() < width - 1) {
+            line += std::string(width - 1 - (int)line.length(), ' ');
+        }
+        line += "|";
+        std::cout << line << std::endl;
+    }
+}
+
+void ClockDisplay::renderCompact() {
+    printBorder('=');
+    printCentered(timezones[current_index]->getCode() + "  " +
+                  getShortTimeString(timezones[current_index]->getOffset()));
+    printBorder('=');
+    printCentered("<- ->   q");
+}
+
+void ClockDisplay::renderStandard() {
+    printBorder('=');
+    printCentered("WORLD CLOCK - Timezone Roller");
+    printBorder('=');
+
+    printCentered(timezones[current_index]->getDisplayName());
+    printCentered(timezones[current_index]->getTimeString());
+
+    printDivider();
+    printProgressBar();
+
+    printBorder('=');
+    printCentered("<- Prev   Next ->   r Refresh   q Quit");
+    printBorder('=');
+}
+
+void ClockDisplay::renderFull() {
+    printBorder('=');
+    printCentered("WORLD CLOCK - Timezone Roller");
+    printBorder('=');
+
+    printCentered(timezones[current_index]->getDisplayName());
+    printCentered(timezones[current_index]->getTimeString());
+
+    printDivider();
+    printProgressBar();
+
+    std::string utc_line = "UTC Time: " + getUTCTimeString();
+    printCentered(utc_line);
+
+    printDivider();
+    printAllTimezones();
+
+    printBorder('=');
+    printCentered("<- Prev   Next ->   r Refresh   q Quit");
+    printBorder('=');
+}
+
 void ClockDisplay::handleInput() {
     int ch = read_key();
     if (ch < 0) return;
@@ -149,28 +271,23 @@ void ClockDisplay::handleInput() {
 void ClockDisplay::render() {
     std::cout << "\033[H";
 
-    printBorder('=');
-    printCentered("WORLD CLOCK - Timezone Roller");
-    printBorder('=');
-
-    std::string display_line = timezones[current_index]->getDisplayName();
-    printCentered(display_line);
-    printCentered(timezones[current_index]->getTimeString());
-
-    printDivider();
-    printProgressBar();
-
-    std::string utc_line = "UTC Time: " + getUTCTimeString();
-    printCentered(utc_line);
-
-    printBorder('=');
-    printCentered("<- Prev   Next ->   r Refresh   q Quit");
-    printBorder('=');
+    switch (detail) {
+        case DetailLevel::Compact:
+            renderCompact();
+            break;
+        case DetailLevel::Standard:
+            renderStandard();
+            break;
+        case DetailLevel::Full:
+            renderFull();
+            break;
+    }
 
     std::cout.flush();
 }
 
-ClockDisplay::ClockDisplay() : current_index(0), width(55) {
+ClockDisplay::ClockDisplay() : current_index(0), width(55), columns(0), rows(0),
+                               detail(DetailLevel::Standard) {
     std::signal(SIGINT, signalHandler);
 
     std::cout << "\033[?1049h";
@@ -193,6 +310,9 @@ ClockDisplay::~ClockDisplay() {
 
 void ClockDisplay::run() {
     while (running) {
+        if (updateScreenSize()) {
+            std::cout << "\033[2J\033[H";
+        }
         calculateWidth();
         render();
         handleInput();
